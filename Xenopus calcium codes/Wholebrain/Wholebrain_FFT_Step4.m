@@ -16,11 +16,13 @@
 %     - Overlay_Mean_SD_PowerSpectra_Control_vs_Test.png
 %     - Overlay_Mean_95CI_PowerSpectra_Control_vs_Test.png
 %     - WholeBrain_FrequencyBand_Summary_with_LogLogPower.csv
+%     - Overlay_PowerSpectra_SourceData_ReplicateSpectra.csv      
+%     - Overlay_PowerSpectra_SourceData_Mean_95CI.csv             
 %
 % Notes:
 %   - fps defaults to 2 Hz (edit to match acquisition)
-%   - spectra are interpolated onto a fixed frequency grid (500 points)
-%   - "band power" is computed via trapezoidal integration over the band
+%   - spectra are interpolated onto a fixed frequency grid (nFreqPoints)
+%   - band power is computed via trapezoidal integration over the band
 %   - y-axis is log scale; values are protected from log(0) by a minimum
 
 %% ================================
@@ -64,7 +66,7 @@ colorTest         = [0.8350, 0.3686, 0.0000];  % Orange
 colorControlLight = [0.6, 0.8, 1.0];
 colorTestLight    = [1.0, 0.7, 0.5];
 
-% Frequency bands (edit/add as needed)
+% Frequency bands
 bands = struct();
 bands.FullBand = [0.01, 1.0];
 
@@ -98,7 +100,8 @@ testData    = ensureReplicateIDs(testData, "Test");
 nControl = numel(controlData);
 nTest    = numel(testData);
 
-summaryData = cell(nControl + nTest, 4); % Group | ReplicateID | FullBandPower | Variance
+% Summary: Group | ReplicateID | FullBandPower | Variance
+summaryData = cell(nControl + nTest, 4);
 
 allPowerSpectra = zeros(nControl + nTest, nFreqPoints);
 
@@ -106,20 +109,19 @@ allPowerSpectra = zeros(nControl + nTest, nFreqPoints);
 for i = 1:nControl
     repID = string(controlData(i).replicateID);
     fluorescence = controlData(i).fluorescenceData;
+
     [spec, totalBandPower] = computeReplicateSpectrumAndBandPower( ...
         fluorescence, fps, allFrequencies, bands.FullBand);
 
-    % Fix Nyquist artifact (kept from your original)
+    % Fix Nyquist artifact (kept from your working code)
     spec(end) = spec(end-1);
 
     allPowerSpectra(i, :) = spec;
 
-    % Save per-replicate spectrum plot
     outFig = fullfile(outputDir, "PowerSpectrum_WholeBrain_Control_" + repID + ".png");
     savePowerSpectrumFigure(allFrequencies, spec, colorControl, xLimits, yLimits, ...
         "Power Spectrum — Whole Brain Control — " + repID, outFig);
 
-    % Replicate variance of mean trace (kept from your original)
     replicateVariance = var(mean(fluorescence, 1, "omitnan"));
 
     summaryData{i, 1} = "Control";
@@ -132,6 +134,7 @@ end
 for i = 1:nTest
     repID = string(testData(i).replicateID);
     fluorescence = testData(i).fluorescenceData;
+
     [spec, totalBandPower] = computeReplicateSpectrumAndBandPower( ...
         fluorescence, fps, allFrequencies, bands.FullBand);
 
@@ -159,22 +162,24 @@ end
 controlSpectra = allPowerSpectra(1:nControl, :);
 testSpectra    = allPowerSpectra(nControl+1:end, :);
 
+% Mean spectra (smoothed to match working code)
 controlMean = smoothdata(mean(controlSpectra, 1), "movmean", 5);
-controlSEM  = std(controlSpectra, 0, 1) / sqrt(max(nControl,1));
+testMean    = smoothdata(mean(testSpectra,    1), "movmean", 5);
 
-testMean = smoothdata(mean(testSpectra, 1), "movmean", 5);
-testSEM  = std(testSpectra, 0, 1) / sqrt(max(nTest,1));
+% SEM across animals
+controlSEM  = std(controlSpectra, 0, 1) / sqrt(max(nControl, 1));
+testSEM     = std(testSpectra,    0, 1) / sqrt(max(nTest,    1));
 
 % ---- Overlay: all replicates + Mean ± SEM ----
 outOverlaySEM = fullfile(outputDir, "Overlay_All_PowerSpectra_Control_vs_Test.png");
 plotOverlayAllAndMeanBand(allFrequencies, controlSpectra, testSpectra, ...
     controlMean, controlSEM, testMean, testSEM, ...
     colorControl, colorControlLight, colorTest, colorTestLight, ...
-    xLimits, yLimits, outOverlaySEM, "Overlay of Power Spectra — Control vs Test (Mean ± SEM)");
+    xLimits, yLimits, minY, outOverlaySEM, "Overlay of Power Spectra — Control vs Test (Mean ± SEM)");
 
 % ---- Mean ± SD ----
 controlSD = std(controlSpectra, 0, 1);
-testSD    = std(testSpectra, 0, 1);
+testSD    = std(testSpectra,    0, 1);
 
 outOverlaySD = fullfile(outputDir, "Overlay_Mean_SD_PowerSpectra_Control_vs_Test.png");
 plotOverlayMeanBand(allFrequencies, controlMean, controlSD, testMean, testSD, ...
@@ -182,28 +187,64 @@ plotOverlayMeanBand(allFrequencies, controlMean, controlSD, testMean, testSD, ..
 
 % ---- Mean ± 95% CI ----
 controlCI = controlSEM * 1.96;
-testCI    = testSEM * 1.96;
+testCI    = testSEM    * 1.96;
 
 outOverlayCI = fullfile(outputDir, "Overlay_Mean_95CI_PowerSpectra_Control_vs_Test.png");
 plotOverlayMeanBand(allFrequencies, controlMean, controlCI, testMean, testCI, ...
     colorControl, colorTest, xLimits, yLimits, minY, outOverlayCI, "Mean ± 95% CI of Power Spectra — Control vs Test");
 
 %% ================================
+% 4b) EXPORT SOURCE DATA FOR FIG e
+% ================================
+disp("Exporting FFT source data for Figure e...");
+
+controlNames = arrayfun(@(i) sprintf("Control_Replicate%d", i), 1:nControl, "UniformOutput", false);
+testNames    = arrayfun(@(i) sprintf("Test_Replicate%d",    i), 1:nTest,    "UniformOutput", false);
+
+freq = allFrequencies(:);
+
+% Replicate-level spectra (long format)
+Tctrl = table();
+Tctrl.Group        = repmat("Control", nControl*numel(freq), 1);
+Tctrl.Replicate    = repelem(string(controlNames(:)), numel(freq), 1);
+Tctrl.Frequency_Hz = repmat(freq, nControl, 1);
+Tctrl.Power        = reshape(controlSpectra.', [], 1);
+
+Ttest = table();
+Ttest.Group        = repmat("Test", nTest*numel(freq), 1); % change label if desired
+Ttest.Replicate    = repelem(string(testNames(:)), numel(freq), 1);
+Ttest.Frequency_Hz = repmat(freq, nTest, 1);
+Ttest.Power        = reshape(testSpectra.', [], 1);
+
+Treplicate = [Tctrl; Ttest];
+writetable(Treplicate, fullfile(outputDir, "Overlay_PowerSpectra_SourceData_ReplicateSpectra.csv"));
+
+% Frequency-resolved mean ± 95% CI (what is drawn in the mean+CI figure)
+TmeanCI = table( ...
+    freq, ...
+    controlMean(:), controlCI(:), ...
+    testMean(:),    testCI(:), ...
+    "VariableNames", ["Frequency_Hz","ControlMean","ControlCI95","TestMean","TestCI95"]);
+writetable(TmeanCI, fullfile(outputDir, "Overlay_PowerSpectra_SourceData_Mean_95CI.csv"));
+
+disp("FFT source data exported.");
+
+%% ================================
 % 5) SUMMARY CSV
 % ================================
 
-tableHeaders = { ...
+summaryTable = cell2table(summaryData);
+summaryTable.Properties.VariableNames = { ...
     "Group", "Replicate", ...
     "FullBand_0_01to1Hz_mV2", ...
     "SignalVariance_DeltaFoverF_squared"};
 
-summaryTable = cell2table(summaryData, "VariableNames", tableHeaders);
 writetable(summaryTable, fullfile(outputDir, "WholeBrain_FrequencyBand_Summary_with_LogLogPower.csv"));
 
 disp("Step 4 complete. FFT outputs saved.");
 
 %% ============================================================
-% FUNCTIONS
+% FUNCTIONS (must be at end of file for MATLAB script compatibility)
 %% ============================================================
 
 function data = ensureReplicateIDs(data, groupLabel)
@@ -226,7 +267,7 @@ function [totalPowerSpectrum, totalBandPower] = computeReplicateSpectrumAndBandP
     for roiIdx = 1:nROIs
         signal = fluorescence(roiIdx, :);
 
-        % Skip invalid or flat signals (kept from your original)
+        % Skip invalid or flat signals
         if any(isnan(signal)) || any(isinf(signal)) || range(signal) < 1e-6
             continue;
         end
@@ -237,14 +278,14 @@ function [totalPowerSpectrum, totalBandPower] = computeReplicateSpectrumAndBandP
         totalPowerSpectrum = totalPowerSpectrum + interp1( ...
             frequencies, powerSpectrum, freqGrid, "linear", "extrap");
 
-        % Sum band power
+        % Sum band power (AUC in native FFT binning)
         totalBandPower = totalBandPower + computeTotalBandPower( ...
             frequencies, powerSpectrum, band, true);
 
         validCount = validCount + 1;
     end
 
-    % Average spectrum across ROIs (use validCount to avoid bias if many ROIs skipped)
+    % Average spectrum across valid ROIs
     if validCount > 0
         totalPowerSpectrum = totalPowerSpectrum / validCount;
     else
@@ -309,12 +350,11 @@ function savePowerSpectrumFigure(freq, spec, lineColor, xLimits, yLimits, figTit
 end
 
 function plotOverlayAllAndMeanBand(freq, controlSpectra, testSpectra, controlMean, controlSEM, testMean, testSEM, ...
-    colorControl, colorControlLight, colorTest, colorTestLight, xLimits, yLimits, outFile, figTitle)
+    colorControl, colorControlLight, colorTest, colorTestLight, xLimits, yLimits, minY, outFile, figTitle)
 
     fig = figure("Visible", "off");
     hold on;
 
-    % all replicate lines
     for i = 1:size(controlSpectra, 1)
         semilogy(freq, controlSpectra(i, :), "Color", colorControlLight, "LineWidth", 1, "HandleVisibility", "off");
     end
@@ -322,11 +362,10 @@ function plotOverlayAllAndMeanBand(freq, controlSpectra, testSpectra, controlMea
         semilogy(freq, testSpectra(i, :), "Color", colorTestLight, "LineWidth", 1, "HandleVisibility", "off");
     end
 
-    % Mean ± SEM shading (protect against <=0 on log scale)
-    ctrl_upper = max(controlMean + controlSEM, 1e-8);
-    ctrl_lower = max(controlMean - controlSEM, 1e-8);
-    test_upper = max(testMean + testSEM, 1e-8);
-    test_lower = max(testMean - testSEM, 1e-8);
+    ctrl_upper = max(controlMean + controlSEM, minY);
+    ctrl_lower = max(controlMean - controlSEM, minY);
+    test_upper = max(testMean + testSEM, minY);
+    test_lower = max(testMean - testSEM, minY);
 
     fill([freq, fliplr(freq)], [ctrl_upper, fliplr(ctrl_lower)], colorControl, ...
         "FaceAlpha", 0.2, "EdgeColor", "none", "HandleVisibility", "off");
